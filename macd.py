@@ -25,18 +25,34 @@ def set_backtest():
     # 开启动态复权模式(真实价格)
     set_option('use_real_price', True)
     log.set_level('order','error')
-    
-def before_trading_start(context):
     set_slippage(FixedSlippage(0.02))
     set_order_cost(OrderCost(open_tax=0, close_tax=0.001, \
                              open_commission=0.0003, close_commission=0.0003,\
                              close_today_commission=0, min_commission=5), type='stock')
 
-def filter_stocks(stock_list):
-    current_data=get_current_data()
-    stocks=[stock for stock in stock_list if not current_data[stock].paused and not '退' in current_data[stock].name and not current_data[stock].is_st ]
+def is_new_stock(context,stock_code, n=60):
+    start_date = get_security_info(stock_code).start_date
+    today = context.current_dt.date()
+    n_days_ago = get_trade_days(end_date=today, count=n)[0]
+
+    return (today - start_date).days <= n
     
-    return stocks
+def filter_stocks(context,stock_list,n=60):
+    stock_list = get_all_securities('stock', context.current_dt).index.tolist()
+    current_data=get_current_data()
+    stock_list = [stock for stock in stock_list if not (
+            (current_data[stock].day_open == current_data[stock].high_limit) or   # 涨停开盘
+            (current_data[stock].day_open == current_data[stock].low_limit) or    # 跌停开盘
+            current_data[stock].paused or  # 停牌
+            current_data[stock].is_st or   # ST
+            ('ST' in current_data[stock].name) or
+            ('*' in current_data[stock].name) or
+            ('退' in current_data[stock].name) or
+            (stock.startswith('300')) or    # 创业
+            (stock.startswith('688')) or  # 科创
+            is_new_stock(context,stock) # 次新股
+    )]
+    return stock_list
 
 def trade(context):
     if not g.days or g.refresh_rate%10!=0:
@@ -45,7 +61,6 @@ def trade(context):
     # PE：Price to Earnings Ratio，股价/EPS
     # PB: Price to Book ratio，等于股价/每股净资产，用来表明股价是否能体现资产
     # EPS: Earnings Per Share
-    # inc_net_profit_annual：净利润同比增长率（年）
     # ROE 是 Return on Equity 的缩写，中文是 净资产收益率, 等于净收入/净资产
     stock_to_choose=get_fundamentals(query(
         valuation.code,valuation.pe_ratio,
@@ -55,11 +70,10 @@ def trade(context):
         ).filter(
             valuation.pe_ratio<40,
             valuation.pe_ratio>10,
-            indicator.eps>0.3,
-            indicator.inc_net_profit_annual>0.3,
+            indicator.eps>0.3,indicator.inc_net_profit_annual>0.3,
             indicator.roe>15
             ).order_by(valuation.pb_ratio.asc()).limit(50), date=None)
-    stock_codes=filter_stocks(list(stock_to_choose['code']))
+    stock_codes=filter_stocks(context,list(stock_to_choose['code']))
     buy_list=[]
     sell_list=[]
     hold_list=list(context.portfolio.positions.keys())
